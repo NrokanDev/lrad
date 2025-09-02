@@ -63,7 +63,7 @@ export default async function RootLayout({ children }) {
                 </Link>
                 <Link
                   href="/sign-in"
-                  className="bg-[#E7E2FF] px-4 py-2 rounded-2xl font-semibold hover:bg-purple-200 transition-colors"
+                  className="bg-[#E7E2FF] px-4 py-2 rounded-2xl font-semibold hover:bg-purple-200 transition-colors "
                 >
                   Sign In
                 </Link>

@@ -11,39 +11,49 @@ export async function POST(req) {
     return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
   }
 
-  // 🔹 save ไฟล์ชั่วคราว
+  // save temp
   const bytes = await file.arrayBuffer();
   const buffer = Buffer.from(bytes);
   const tempPath = path.join(process.cwd(), "temp_" + file.name);
   fs.writeFileSync(tempPath, buffer);
 
-  // ✅ path ไปยัง predict.py
-  const pythonScript = path.join("C:\\Users\\nroka\\Desktop\\Project\\Backend\\prediction.py");
-  // const pythonScript = path.join("C:\\Users\\nroka\\Desktop\\Project\\Backend\\prediction.py"); //PC
+  // relative path ไปยัง python script
+  const pythonScript = path.join(process.cwd(), "Backend", "prediction.py");
 
-  return new Promise((resolve) => {
-    const python = spawn("python", [pythonScript, tempPath]);
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const python = spawn("python", [pythonScript, tempPath]);
 
-    let output = "";
-    python.stdout.on("data", (data) => {
-      output += data.toString();
+      let output = "";
+      let errorOutput = "";
+
+      python.stdout.on("data", (data) => (output += data.toString()));
+      python.stderr.on("data", (data) => (errorOutput += data.toString()));
+
+      python.on("close", (code) => {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); // ลบไฟล์ temp
+
+        if (code !== 0) {
+          console.error("Python stderr:", errorOutput);
+          return reject(new Error("Python script failed"));
+        }
+
+        // parse exposure
+        const match = output.match(/([Ee]xposure).*?:\s*([\d.-]+)/);
+        let exposure = match ? parseFloat(match[2]) : null;
+
+        if (exposure === null || isNaN(exposure)) {
+          return reject(new Error("Could not parse exposure"));
+        }
+
+        resolve({ exposure });
+      });
     });
 
-    python.stderr.on("data", (data) => {
-      console.error("Python error:", data.toString());
-    });
-
-    python.on("close", () => {
-      // ลบไฟล์ temp ถ้ายังมีอยู่
-      if (fs.existsSync(tempPath)) {
-        fs.unlinkSync(tempPath);
-      }
-
-      // ดึง exposure จากข้อความที่ predict.py print ออกมา
-      const match = output.match(/([Ee]xposure).*?:\s*([\d.-]+)/);
-      const exposure = match ? parseFloat(match[2]) : null;
-
-      resolve(NextResponse.json({ exposure }));
-    });
-  });
+    return NextResponse.json(result);
+  } catch (err) {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    console.error("Error:", err.message);
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
 }
