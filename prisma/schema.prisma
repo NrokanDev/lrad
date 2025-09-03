@@ -7,26 +7,26 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Users {
-  id       String  @id @default(auto()) @map("_id") @db.ObjectId
-  name     String
-  email    String  @unique
-  password String
-  albums   Albums[]
-}
-
 model Albums {
-  id       String  @id @default(auto()) @map("_id") @db.ObjectId
-  title    String
-  userId   String  @db.ObjectId
-  user     Users   @relation(fields: [userId], references: [id])
-  photos   Photos[]
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  title  String
+  userId String @db.ObjectId
 }
 
 model Photos {
-  id       String  @id @default(auto()) @map("_id") @db.ObjectId
-  url      String
-  caption  String?
-  albumId  String  @db.ObjectId
-  album    Albums  @relation(fields: [albumId], references: [id])
+  id        String @id @default(auto()) @map("_id") @db.ObjectId
+  albumId   String @db.ObjectId
+  caption   String
+  contrast  Float
+  exposure  Float
+  highlight Float
+  shadow    Float
+  url       String
+}
+
+model Users {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  email    String @unique
+  name     String
+  password String
 }

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import SignOutButton from "@/components/SignOutButton";
+import { SessionProvider } from "next-auth/react";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -71,7 +72,6 @@ export default async function RootLayout({ children }) {
             )}
           </div>
         </div>
-
         {children}
       </body>
     </html>
