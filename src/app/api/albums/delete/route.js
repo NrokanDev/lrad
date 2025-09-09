@@ -6,30 +6,28 @@ import path from "path";
 export async function POST(req) {
   try {
     const { albumId } = await req.json();
-
-    if (!albumId) {
-      return NextResponse.json({ error: "Missing albumId" }, { status: 400 });
+    if (!albumId || typeof albumId !== "string") {
+      return NextResponse.json({ error: "Missing or invalid albumId" }, { status: 400 });
     }
 
-    // ตรวจสอบว่า album มีอยู่
+    // 1) ตรวจว่าอัลบั้มมีอยู่ (ไม่ต้อง include photos)
     const album = await prisma.albums.findUnique({
       where: { id: albumId },
-      include: { photos: true }, // ดึง photos เพื่อเอาไปลบไฟล์
+      select: { id: true },
     });
-
     if (!album) {
       return NextResponse.json({ error: "Album ไม่พบ" }, { status: 404 });
     }
 
-    // ลบไฟล์รูปทั้งหมดในโฟลเดอร์ public/uploads/[albumId]
+    // 2) ลบไฟล์จริงในโฟลเดอร์ public/uploads/[albumId]
     const uploadDir = path.join(process.cwd(), "public", "uploads", albumId);
-    await rm(uploadDir, { recursive: true, force: true });
+    await rm(uploadDir, { recursive: true, force: true }); // force=true เงียบถ้าโฟลเดอร์ไม่มี
 
-    // ลบ photos ใน MongoDB
-    await prisma.photos.deleteMany({ where: { albumId } });
-
-    // ลบ Album
-    await prisma.albums.delete({ where: { id: albumId } });
+    // 3) ลบข้อมูลใน DB (ลูปทีเดียวด้วย transaction)
+    await prisma.$transaction([
+      prisma.photos.deleteMany({ where: { albumId } }),
+      prisma.albums.delete({ where: { id: albumId } }),
+    ]);
 
     return NextResponse.json({ message: "ลบอัลบั้มสำเร็จ" });
   } catch (err) {

@@ -1,279 +1,349 @@
 "use client";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { useRef, useState, useEffect } from "react";
+
+const toneMap = { "งานแต่ง": "wedding", "งานบวช": "buat", "พอร์ต-รับปริญญา": "portfolio" };
+
+// อ่าน JSON แบบกันเคส body ว่าง/ไม่ใช่ JSON
+async function readJsonOrThrow(res) {
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || `HTTP ${res.status} ${res.statusText}`);
+  try { return JSON.parse(text || "null"); }
+  catch { throw new Error("Invalid JSON from server: " + text.slice(0, 200)); }
+}
 
 export default function AlbumDetail() {
   const { albumId } = useParams();
-  const [albumName, setAlbumName] = useState("");
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState("");
-  const [photos, setPhotos] = useState([]);
-  const [tone, setTone] = useState("");
-  const [results, setResults] = useState({});
-  const [loadingAll, setLoadingAll] = useState(false);
+
+  const [photos, setPhotos] = useState([]);            // [{id,url,afterUrl?}]
+  const [toneUi, setToneUi] = useState("งานแต่ง");
+  const [pred, setPred] = useState({});                // { [id]: {status, vals?, afterImage?, err?} }
+  const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const fileInputRef = useRef(null);
+  const [banner, setBanner] = useState(null);          // แถบแจ้งเตือนด้านบน
+  const [deletingIds, setDeletingIds] = useState(new Set()); // track รูปที่กำลังลบ
+  const controllersRef = useRef([]);
 
-  const toneMap = {
-    งานแต่ง: "wedding",
-    งานบวช: "buat",
-    "พอร์ต-รับปริญญา": "portfolio",
+  // อุ่น (ping) route อัปโหลด เพื่อกันเคส 405/แคชเพิ่งคอมไพล์
+  const pingUploadRoute = async () => {
+    try { await fetch("/api/photos/upload", { method: "GET", cache: "no-store" }); } catch {}
   };
 
-  const handleDivClick = () => {
-    if (fileInputRef.current) fileInputRef.current.click();
-  };
-
-  const handleFileChange = async (e) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    setError("");
-    setUploading(true);
-
-    try {
-      for (const file of files) {
-        const formData = new FormData();
-        formData.append("albumId", albumId);
-        formData.append("photo", file);
-
-        const res = await fetch("/api/photos", {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!res.ok) {
-          setError("อัปโหลดรูป " + file.name + " ไม่สำเร็จ");
-        }
+  // โหลดรูปจาก DB เมื่อเข้าเพจ + อุ่น route อัปโหลด
+  useEffect(() => {
+    (async () => {
+      if (!albumId) return;
+      try {
+        await pingUploadRoute();
+        const res = await fetch(`/api/photos/${albumId}`, { cache: "no-store" });
+        const data = await readJsonOrThrow(res);
+        setPhotos(Array.isArray(data) ? data : []);
+      } catch (e) {
+        console.error("load photos error:", e);
+        setBanner("โหลดรูปจากอัลบั้มไม่สำเร็จ");
       }
+    })();
+  }, [albumId]);
 
-      await fetchPhotos();
-    } catch (err) {
-      setError("เกิดข้อผิดพลาดระหว่างอัปโหลด");
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+  // cleanup abort
+  useEffect(() => {
+    return () => { controllersRef.current.forEach((c) => c.abort?.()); };
+  }, []);
+
+  // อัปโหลดหลายไฟล์ -> เซฟจริง + บันทึก DB
+  const handleSelectFiles = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    const temps = files.map((file) => {
+      const url = URL.createObjectURL(file);
+      return { id: crypto.randomUUID(), url, _temp: true, _file: file, _revoke: url, _status: "uploading" };
+    });
+    setPhotos((prev) => [...temps, ...prev]);
+
+    await pingUploadRoute();
+
+    for (const t of temps) {
+      try {
+        const fd = new FormData();
+        fd.append("file", t._file);
+        fd.append("albumId", albumId);
+
+        const res = await fetch(`/api/photos/upload`, { method: "POST", body: fd });
+        const saved = await readJsonOrThrow(res);
+
+        // แทนที่ temp ด้วยข้อมูลจริงจาก DB (รองรับ afterUrl ถ้ามี)
+        setPhotos((prev) =>
+          prev.map((p) => (p.id === t.id ? { id: saved.id, url: saved.url, afterUrl: saved.afterUrl || null } : p))
+        );
+      } catch (err) {
+        setPhotos((prev) => prev.filter((p) => p.id !== t.id));
+        console.error("upload one failed:", err);
+        setBanner("อัปโหลดรูปบางไฟล์ไม่สำเร็จ");
+      } finally {
+        if (t._revoke) URL.revokeObjectURL(t._revoke);
+      }
     }
+
+    e.target.value = "";
   };
 
-  const fetchAlbum = async () => {
+  // ทำนายค่ารูปเดียว
+  const predictOne = async (photo, { returnImage = 0 } = {}) => {
+    const ctrl = new AbortController();
+    controllersRef.current.push(ctrl);
+    setPred((p) => ({ ...p, [photo.id]: { status: "predicting" } }));
+
     try {
-      const res = await fetch(`/api/albums/${albumId}`);
-      const data = await res.json();
-      if (res.ok) setAlbumName(data.album.title);
-      else setError(data.error || "ไม่สามารถดึงชื่ออัลบั้มได้");
-    } catch (err) {
-      setError("ไม่สามารถดึงชื่ออัลบั้มได้");
+      const imgRes = await fetch(photo.url, { signal: ctrl.signal });
+      if (!imgRes.ok) throw new Error("fetch image failed");
+      const blob = await imgRes.blob();
+      const fileForSend = new File([blob], `${photo.id}.jpg`, { type: blob.type || "image/jpeg" });
+
+      const fd = new FormData();
+      fd.append("file", fileForSend);
+      fd.append("tone", toneMap[toneUi]);
+      fd.append("return_image", String(returnImage)); // 0: เร็ว, 1: ขอ afterImage
+
+      const res = await fetch("http://127.0.0.1:8000/predict", { method: "POST", body: fd, signal: ctrl.signal });
+      const data = await readJsonOrThrow(res);
+      if (data.error) throw new Error(data.error);
+
+      setPred((p) => ({
+        ...p,
+        [photo.id]: {
+          status: "done",
+          vals: {
+            Exposure2012: data.Exposure2012,
+            Contrast2012: data.Contrast2012,
+            Highlights2012: data.Highlights2012,
+            Shadows2012: data.Shadows2012,
+          },
+          afterImage: data.afterImage, // จะมีเมื่อ returnImage=1
+        },
+      }));
+    } catch (e) {
+      setPred((p) => ({ ...p, [photo.id]: { status: "error", err: e.message } }));
     }
   };
 
-  const fetchPhotos = async () => {
+  // เซฟ After ลงดิสก์ + DB (เรียกหลัง predict สำเร็จ ถ้าต้องการ)
+  const saveAfterToDisk = async (photo, predVals, afterDataUrl) => {
     try {
-      const res = await fetch(`/api/photos/${albumId}`);
-      const data = await res.json();
-      if (res.ok) {
-        setPhotos(data.photos);
-
-        // ✅ preload results จาก DB
-        const preload = {};
-        data.photos.forEach((p) => {
-          if (p.exposure !== null) {
-            preload[p.id] = {
-              Exposure2012: p.exposure,
-              Contrast2012: p.contrast,
-              Highlights2012: p.highlight,
-              Shadows2012: p.shadow,
-            };
-          }
-        });
-        setResults(preload);
-      } else setError(data.error || "เกิดข้อผิดพลาด");
-    } catch (err) {
-      setError("ไม่สามารถดึงรูปได้");
+      const saveRes = await fetch("/api/photos/save-after", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          photoId: photo.id,
+          albumId,
+          afterImage: afterDataUrl,
+          exposure: predVals.Exposure2012,
+          contrast: predVals.Contrast2012,
+          highlights: predVals.Highlights2012,
+          shadows: predVals.Shadows2012,
+        }),
+      });
+      const saved = await readJsonOrThrow(saveRes);
+      setPhotos((prev) =>
+        prev.map((p) => (p.id === photo.id ? { ...p, afterUrl: saved.afterUrl } : p))
+      );
+    } catch (e) {
+      console.error("save-after failed:", e);
     }
   };
 
-  const handleDeletePhoto = async (photoId) => {
-    if (!confirm("ลบรูปนี้?")) return;
+  // ทำนายทั้งอัลบั้มแบบจำกัดความขนาน
+  const trainAll = async () => {
+    if (photos.length === 0) return;
+    setRunning(true);
+    setProgress(0);
+
+    const CONCURRENCY = 3;
+    for (let i = 0; i < photos.length; i += CONCURRENCY) {
+      const batch = photos.slice(i, i + CONCURRENCY);
+      await Promise.allSettled(batch.map((ph) => predictOne(ph, { returnImage: 0 })));
+      setProgress(Math.round(((i + batch.length) / photos.length) * 100));
+    }
+    setRunning(false);
+  };
+
+  const previewAfter = (photo) => predictOne(photo, { returnImage: 1 });
+
+  const closePreview = (photoId) => {
+    setPred((p) => {
+      const current = p[photoId] || {};
+      return { ...p, [photoId]: { ...current, afterImage: undefined } };
+    });
+  };
+
+  // ✅ ลบรูป: รองรับ temp (ยังไม่เซฟ DB) และรูปจริง
+  const deletePhoto = async (photo) => {
+    // ถ้ายังเป็น temp (ยังไม่อัปโหลดจริง) แค่ลบออกจาก state
+    if (photo._temp) {
+      if (photo._revoke) URL.revokeObjectURL(photo._revoke);
+      setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+      return;
+    }
+
+    // รูปจริง: เรียก API ลบ
+    const next = new Set(Array.from(deletingIds)); next.add(photo.id);
+    setDeletingIds(next);
     try {
       const res = await fetch("/api/photos/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ photoId }),
+        body: JSON.stringify({ photoId: photo.id, albumId }),
       });
-      const data = await res.json();
-      if (res.ok) setPhotos((prev) => prev.filter((p) => p.id !== photoId));
-      else alert(data.error || "ลบไม่สำเร็จ");
-    } catch (err) {
-      alert("ลบไม่สำเร็จ");
-    }
-  };
-
-  // ✅ Predict 1 รูป + บันทึก DB
-  const runPrediction = async (photo) => {
-    try {
-      const formData = new FormData();
-      const blob = await fetch(photo.url).then((r) => r.blob());
-      formData.append("file", blob, "image.jpg");
-      formData.append("tone", toneMap[tone]);
-
-      const res = await fetch("http://127.0.0.1:8000/predict", {
-        method: "POST",
-        body: formData,
+      const data = await readJsonOrThrow(res);
+      if (!data?.ok) throw new Error("ลบรูปไม่สำเร็จ");
+      // ลบออกจาก state
+      setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+      // เคลียร์ pred state ของรูปนั้น
+      setPred((prev) => {
+        const n = { ...prev }; delete n[photo.id]; return n;
       });
-
-      const data = await res.json();
-      if (res.ok && !data.error) {
-        setResults((prev) => ({ ...prev, [photo.id]: data }));
-
-        // ⬇️ update DB
-        await fetch("/api/photos/train", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            photoId: photo.id,
-            exposure: data.Exposure2012,
-            contrast: data.Contrast2012,
-            highlight: data.Highlights2012,
-            shadow: data.Shadows2012,
-          }),
-        });
-      } else {
-        console.error("Predict error:", data.error);
-      }
-    } catch (err) {
-      console.error("Fetch error:", err);
+    } catch (e) {
+      console.error("delete photo error:", e);
+      setBanner("ลบรูปไม่สำเร็จ");
+    } finally {
+      setDeletingIds((s) => {
+        const t = new Set(Array.from(s)); t.delete(photo.id); return t;
+      });
     }
   };
 
-  const runAllPredictions = async () => {
-    if (!tone) {
-      alert("กรุณาเลือก Tone ก่อน");
-      return;
+  const onClickDelete = (photo) => {
+    if (deletingIds.has(photo.id)) return;
+    if (confirm("ต้องการลบรูปนี้หรือไม่?")) {
+      deletePhoto(photo);
     }
-    setLoadingAll(true);
-    setProgress(0);
-    for (let i = 0; i < photos.length; i++) {
-      await runPrediction(photos[i]);
-      setProgress(Math.round(((i + 1) / photos.length) * 100));
-    }
-    setLoadingAll(false);
   };
-
-  useEffect(() => {
-    fetchAlbum();
-    fetchPhotos();
-  }, [albumId]);
 
   return (
-    <div className="flex flex-col items-center mt-12 bg-[#E7E2FF]">
-      <div className="bg-white p-8 rounded-lg shadow-lg w-[60%] flex flex-col justify-center">
-        {/* Upload */}
-        <div
-          className="w-full h-32 flex flex-col items-center justify-center border-2 border-dashed border-purple-400 rounded-xl cursor-pointer hover:bg-purple-50 transition mb-4"
-          onClick={handleDivClick}
-        >
-          <p className="text-purple-600 font-semibold">
-            Upload Image {albumName && `for "${albumName}"`}
-          </p>
-          <p className="text-gray-400 text-sm">คลิกเพื่อเลือกไฟล์รูป</p>
+    <div className="p-12 m-4">
+      {/* แบนเนอร์แจ้งเตือน */}
+      {banner && (
+        <div className="mb-4 rounded-lg bg-yellow-100 text-yellow-900 px-4 py-2">
+          {banner}
+          <button className="float-right text-sm" onClick={() => setBanner(null)}>ปิด</button>
         </div>
-        <input
-          type="file"
-          accept="image/*"
-          ref={fileInputRef}
-          style={{ display: "none" }}
-          onChange={handleFileChange}
-          multiple
-          disabled={uploading}
-        />
-        {uploading && (
-          <div className="text-gray-500 text-center">กำลังอัปโหลด...</div>
-        )}
-        {error && <div className="text-red-500 text-center">{error}</div>}
+      )}
 
-        {/* Tone Selector */}
-        <div className="flex items-center justify-center">
-          <div className="mt-5 p-1 bg-gray-50 border rounded-xl flex w-[450px]">
-            <p className="p-2 rounded-xl">Select Tone</p>
-            {["งานแต่ง", "งานบวช", "พอร์ต-รับปริญญา"].map((t) => (
-              <button
-                key={t}
-                onClick={() => setTone(t)}
-                className={`m-1 border p-1 rounded-xl border-gray-300 ${
-                  tone === t ? "bg-gray-800 text-white" : "bg-white"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Train All */}
-        <div className="flex flex-col items-center justify-center mt-3 w-full">
-          <button
-            onClick={runAllPredictions}
-            disabled={loadingAll}
-            className={`bg-purple-600 text-white p-2 rounded cursor-pointer w-[200px] ${
-              loadingAll ? "opacity-50 cursor-not-allowed" : ""
-            }`}
+      {/* Controls */}
+      <div className="flex flex-wrap items-center gap-3 mb-5">
+        {/* อัปโหลดหลายไฟล์ */}
+        <div className="flex items-center gap-2">
+          <input
+            id="file-uploader"
+            type="file"
+            className="hidden"
+            accept="image/jpeg,image/jpg,.jpg,.jpeg"
+            multiple
+            onChange={handleSelectFiles}
+          />
+          <label
+            htmlFor="file-uploader"
+            className="cursor-pointer px-4 py-2 rounded-xl bg-purple-800 text-white hover:opacity-90"
           >
-            {loadingAll ? "Processing..." : "Train All"}
-          </button>
-
-          {loadingAll && (
-            <div className="w-full mt-4">
-              <div className="w-full bg-gray-200 rounded-xl overflow-hidden h-6">
-                <div
-                  className="h-6 bg-purple-500 transition-all duration-300 ease-linear"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-              <p className="text-sm mt-2 text-center">{progress}%</p>
-            </div>
-          )}
+            + เพิ่มรูปภาพ
+          </label>
+          <span className="text-sm text-gray-600">อัปโหลดแล้วจะถูกบันทึกลงฐานข้อมูลทันที</span>
         </div>
 
-        {/* Photos */}
-        <div className="mt-6 grid grid-cols-3 gap-4">
-          {photos.map((photo) => (
-            <div
-              key={photo.id}
-              className="flex flex-col w-[70%] rounded overflow-hidden border"
-            >
-              <div className="relative w-full h-[200px] group">
-                <img
-                  src={photo.url}
-                  alt={photo.caption || "Photo"}
-                  className="w-full h-full object-cover"
-                />
+        {/* เลือก Tone */}
+        <div className="flex items-center gap-2 ml-auto">
+          <span className="bg-white me-1 p-1 rounded">Tone:</span>
+          <select
+            value={toneUi}
+            onChange={(e) => setToneUi(e.target.value)}
+            className="border rounded px-2 py-1 bg-white"
+          >
+            <option>งานแต่ง</option>
+            <option>งานบวช</option>
+            <option>พอร์ต-รับปริญญา</option>
+          </select>
+        </div>
+
+        {/* Predict All */}
+        <button
+          disabled={running || photos.length === 0}
+          onClick={trainAll}
+          className="px-4 py-2 rounded-xl bg-purple-600 text-white disabled:opacity-50"
+        >
+          Predict All & Save
+        </button>
+
+        {running && (
+          <div className="flex items-center gap-2">
+            <div className="w-64 h-3 bg-gray-200 rounded overflow-hidden">
+              <div className="h-3 bg-purple-500" style={{ width: `${progress}%` }} />
+            </div>
+            <span className="text-sm">{progress}%</span>
+          </div>
+        )}
+      </div>
+
+      {/* Grid 5 คอลัมน์, ไม่ครอปรูป */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        {photos.map((photo) => {
+          const p = pred[photo.id];
+          const isDeleting = deletingIds.has(photo.id);
+
+          return (
+            <div key={photo.id} className="border rounded-2xl p-2 bg-white/70">
+              {/* กล่องรูป + ปุ่มลบมุมขวาบน */}
+              <div className="relative w-full aspect-[3/2] bg-gray-100 rounded-xl overflow-hidden flex items-center justify-center">
+                <img src={photo.url} alt="" className="w-full h-full object-contain" />
                 <button
-                  onClick={() => handleDeletePhoto(photo.id)}
-                  className="absolute top-1 right-1 bg-red-500 text-white rounded-full 
-                     cursor-pointer w-6 h-6 flex items-center justify-center 
-                     opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                  onClick={() => onClickDelete(photo)}
+                  disabled={isDeleting}
+                  className="absolute top-1 right-1 w-8 h-8 rounded-full bg-red-600/90 text-white text-sm flex items-center justify-center hover:bg-red-700 disabled:opacity-60"
+                  title="ลบรูปนี้"
+                  aria-label="ลบรูปนี้"
                 >
-                  ×
+                  {isDeleting ? "…" : "🗑"}
                 </button>
               </div>
 
-              {/* Results */}
-              <div className="p-2 text-xs bg-gray-100">
-                {results[photo.id] ? (
-                  <>
-                    <p>Exposure: {results[photo.id].Exposure2012}</p>
-                    <p>Contrast: {results[photo.id].Contrast2012}</p>
-                    <p>Highlights: {results[photo.id].Highlights2012}</p>
-                    <p>Shadows: {results[photo.id].Shadows2012}</p>
-                  </>
-                ) : (
-                  <p className="text-gray-400">ยังไม่ได้ Predict</p>
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={() => previewAfter(photo)}
+                  className="px-3 py-1 rounded bg-gray-800 text-white text-xs"
+                >
+                  Preview After
+                </button>
+              </div>
+
+              <div className="mt-2 text-xs">
+                {p?.status === "predicting" && <span className="text-gray-500">Predicting...</span>}
+                {p?.status === "error" && <span className="text-red-600">Error: {p.err}</span>}
+                {p?.vals && (
+                  <ul className="mt-1 space-y-0.5">
+                    <li>Exposure: {p.vals.Exposure2012}</li>
+                    <li>Contrast: {p.vals.Contrast2012}</li>
+                    <li>Highlights: {p.vals.Highlights2012}</li>
+                    <li>Shadows: {p.vals.Shadows2012}</li>
+                  </ul>
                 )}
               </div>
+
+              {/* แสดง After: ใช้ไฟล์จริงถ้ามี ไม่งั้นใช้ preview */}
+              {(photo.afterUrl || p?.afterImage) && (
+                <div className="relative mt-2 group">
+                  <img src={photo.afterUrl || p.afterImage} alt="After" className="w-full rounded-lg" />
+                  <button
+                    onClick={() => closePreview(photo.id)}
+                    className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/70 text-white text-xs flex items-center justify-center hover:bg-black opacity-0 group-hover:opacity-100 transition"
+                    title="ปิดพรีวิว"
+                    aria-label="Close preview"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
             </div>
-          ))}
-        </div>
+          );
+        })}
       </div>
     </div>
   );

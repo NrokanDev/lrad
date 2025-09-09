@@ -1,29 +1,19 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 
-export async function GET(req, { params }) {
-  try {
-    const { albumId } = params; // รับ albumId จาก URL
+export const dynamic = "force-dynamic"; // กัน cache
 
-    // ดึง Album จาก MongoDB
-    const album = await prisma.albums.findUnique({
-      where: { id: albumId },
-      select: { id: true, title: true }, // เราต้องการแค่ชื่อ
-    });
-
-    if (!album) {
-      return NextResponse.json(
-        { error: "ไม่พบอัลบั้ม" },
-        { status: 404 }
-      );
-    }
-
-    return NextResponse.json({ album });
-  } catch (err) {
-    console.error("Fetch album error:", err);
-    return NextResponse.json(
-      { error: "ไม่สามารถดึงชื่ออัลบั้มได้" },
-      { status: 500 }
-    );
+export async function GET(_req, ctx) {
+  // ⬇️ ต้อง await params ใน Next.js 15
+  const { albumId } = await ctx.params;
+  if (!albumId) {
+    return NextResponse.json({ error: "Missing albumId" }, { status: 400 });
   }
+
+  const items = await prisma.photos.findMany({
+    where: { albumId },
+    orderBy: { id: "desc" },
+  });
+
+  return NextResponse.json(items);
 }

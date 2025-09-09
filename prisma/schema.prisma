@@ -14,14 +14,14 @@ model Albums {
 }
 
 model Photos {
-  id        String @id @default(auto()) @map("_id") @db.ObjectId
-  albumId   String @db.ObjectId
-  caption   String
-  contrast  Float
-  exposure  Float
-  highlight Float
-  shadow    Float
-  url       String
+  id        String  @id @default(auto()) @map("_id") @db.ObjectId
+  albumId   String  @db.ObjectId
+  url       String        
+  caption   String  @default("")
+  exposure  Float?
+  contrast  Float?
+  highlight Float?
+  shadow    Float?
 }
 
 model Users {
